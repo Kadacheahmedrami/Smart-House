@@ -17,7 +17,31 @@ declare global {
   }
 }
 
-const WAKE_WORD = "sirius"
+// Function to check if the input contains Sirius or similar wake words
+function containsSiriusWakeWord(input: string): boolean {
+  const normalizedInput = input.toLowerCase().trim()
+  
+  // List of Sirius variations and similar words
+  const siriusVariations = [
+    'sirius',
+    'serious',
+    'syrius',
+    'cyrius',
+    'sirus',
+    'sirous',
+    'serius',
+    'sirious',
+    'hey sirius',
+    'ok sirius'
+  ]
+  
+  // Check if any variation is found
+  return siriusVariations.some(variation => 
+    normalizedInput.includes(variation) || 
+    normalizedInput.startsWith(variation) ||
+    normalizedInput === variation
+  )
+}
 
 type SystemStatusType =
   | "IDLE"
@@ -33,7 +57,7 @@ export default function VoiceChatPage() {
   const [isLoading, setIsLoading] = useState(false) // For API calls
   const [currentTranscript, setCurrentTranscript] = useState("")
   const [systemStatus, setSystemStatus] = useState<SystemStatusType>("IDLE")
-  const [statusMessage, setStatusMessage] = useState("Click the mic and say 'Sirius' followed by your command.")
+  const [statusMessage, setStatusMessage] = useState("Click the mic and say 'Sirius' (or similar) followed by your command.")
   const [lastSpokenResponse, setLastSpokenResponse] = useState("")
 
   const recognitionRef = useRef<any>(null)
@@ -59,7 +83,7 @@ export default function VoiceChatPage() {
 
     utterance.onend = () => {
       setSystemStatus("IDLE")
-      setStatusMessage("Click the mic and say 'Sirius' followed by your command.")
+      setStatusMessage("Click the mic and say 'Sirius' (or similar) followed by your command.")
       if (isListening) {
         // If mic was on, turn it back on after speaking
         if (recognitionRef.current && recognitionRef.current.stop) recognitionRef.current.start()
@@ -95,7 +119,7 @@ export default function VoiceChatPage() {
     recognition.onstart = () => {
       setIsListening(true)
       setSystemStatus("LISTENING")
-      setStatusMessage("Listening... Say 'Sirius' then your command.")
+      setStatusMessage("Listening... Say 'Sirius' (or similar) then your command.")
     }
 
     recognition.onresult = (event: any) => {
@@ -132,7 +156,7 @@ export default function VoiceChatPage() {
       // If it was processing, it will be handled by processCommand.
       if (systemStatus === "LISTENING") {
         setSystemStatus("IDLE")
-        setStatusMessage("Click the mic and say 'Sirius' followed by your command.")
+        setStatusMessage("Click the mic and say 'Sirius' (or similar) followed by your command.")
       }
     }
 
@@ -171,32 +195,26 @@ export default function VoiceChatPage() {
 
   const processCommand = async (text: string) => {
     setCurrentTranscript(text) // Show the final recognized text
-    if (!text.toLowerCase().startsWith(WAKE_WORD)) {
+    
+    // Use the updated wake word detection function
+    if (!containsSiriusWakeWord(text)) {
       setSystemStatus("NO_WAKE_WORD")
-      setStatusMessage(`Please start with "${WAKE_WORD}". You said: "${text}"`)
-      // speak(`I'm sorry, I only respond to commands starting with ${WAKE_WORD}.`)
+      setStatusMessage(`Please start with 'Sirius' or similar. You said: "${text}"`)
+      speak("I'm sorry, I only respond to commands starting with Sirius or similar wake words.")
       setIsListening(false) // Stop listening if wake word not detected
       return
     }
 
-    const command = text.substring(WAKE_WORD.length).trim()
-    if (!command) {
-      setSystemStatus("IDLE")
-      setStatusMessage("No command after 'Sirius'. Try again.")
-      // speak("I heard Sirius, but what is your command?")
-      setIsListening(false)
-      return
-    }
-
     setSystemStatus("PROCESSING")
-    setStatusMessage(`Processing: "${command}"`)
+    setStatusMessage(`Processing: "${text}"`)
     setIsLoading(true)
 
     try {
+      // Send the full text to the API - it will handle wake word detection and removal
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: command }),
+        body: JSON.stringify({ message: text }),
       })
 
       if (!res.ok) {
@@ -205,12 +223,20 @@ export default function VoiceChatPage() {
       }
       const data = await res.json()
 
-      speak(data.message || "I've processed that.")
-
-      if (data.type === "action" && data.command) {
+      // Handle different response types from the updated API
+      if (data.type === "conversation") {
+        speak(data.message)
+      } else if (data.type === "clarification") {
+        speak(data.message)
+      } else if (data.type === "error") {
+        speak(data.message)
+      } else if (data.type === "action" && data.command) {
+        // Speak confirmation of the action
+        const actionConfirmation = `Executing ${data.command.action} ${data.command.target.replace('_', ' ')}`
+        speak(actionConfirmation)
+        
         if (!esp32Ip || !isConnected) {
-          const espErrorMsg = `Understood: ${data.command.action} ${data.command.target}. But ESP32 is not connected.`
-          setLastSpokenResponse(espErrorMsg) // Update this for display
+          const espErrorMsg = `Command understood, but ESP32 is not connected.`
           speak(espErrorMsg)
           toast({
             title: "ESP32 Not Connected",
@@ -221,14 +247,17 @@ export default function VoiceChatPage() {
           setSystemStatus("ESP32_COMMAND_SENT")
           setStatusMessage(`Sending to ESP32: ${data.command.action} ${data.command.target}`)
           const commandResult = await sendEsp32Command(data.command)
-          // The main AI response is already spoken. Now speak ESP32 feedback.
-          speak(commandResult.message) // This will update statusMessage via speak()
+          // Speak ESP32 feedback
+          speak(commandResult.message)
           if (!commandResult.success) {
             toast({ title: "ESP32 Command Failed", description: commandResult.message, variant: "destructive" })
           } else {
             toast({ title: "ESP32 Command Success", description: commandResult.message })
           }
         }
+      } else {
+        // Fallback for unexpected response format
+        speak("I processed your command, but received an unexpected response format.")
       }
     } catch (error: any) {
       console.error("Processing command error:", error)
@@ -322,6 +351,13 @@ export default function VoiceChatPage() {
             {isListening ? <MicOff className="h-10 w-10" /> : <Mic className="h-10 w-10" />}
           </Button>
           <p className="text-xs text-muted-foreground">{isListening ? "Tap to stop" : "Tap to start listening"}</p>
+          
+          <div className="text-xs text-muted-foreground text-center">
+            <p className="mb-1">Supported wake words:</p>
+            <p className="text-xs opacity-70">
+              Sirius, Serious, Hey Sirius, OK Sirius, and similar variations
+            </p>
+          </div>
         </CardContent>
       </Card>
       {!esp32Ip && (
