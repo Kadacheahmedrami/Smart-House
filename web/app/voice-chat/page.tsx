@@ -1,180 +1,334 @@
-import { GoogleGenerativeAI } from "@google/generative-ai"
-import { type NextRequest, NextResponse } from "next/server"
+"use client"
 
-// Function to check if the input contains Sirius or similar wake words
-function containsSiriusWakeWord(input: string): boolean {
-  const normalizedInput = input.toLowerCase().trim()
-  
-  // List of Sirius variations and similar words
-  const siriusVariations = [
-    'sirius',
-    'serious',
-    'syrius',
-    'cyrius',
-    'sirus',
-    'sirous',
-    'serius',
-    'sirious',
-    'hey sirius',
-    'ok sirius',
-    'sirius,',
-    'sirius.'
-  ]
-  
-  // Check if any variation is found
-  return siriusVariations.some(variation => 
-    normalizedInput.includes(variation) || 
-    normalizedInput.startsWith(variation) ||
-    normalizedInput === variation
-  )
-}
+import { useState, useEffect, useRef } from "react"
+import { Button } from "@/components/ui/button"
+import { Mic, MicOff, Loader2, AlertCircle, Zap, Volume2, Info } from "lucide-react"
+import { useEsp32 } from "@/app/contexts/esp32-context"
+import { useToast } from "@/components/ui/use-toast"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
 
-// Function to remove Sirius wake word from the command
-function removeSiriusWakeWord(input: string): string {
-  let cleanInput = input.toLowerCase().trim()
-  
-  const siriusVariations = [
-    'hey sirius',
-    'ok sirius',
-    'sirius,',
-    'sirius.',
-    'sirius',
-    'serious',
-    'syrius',
-    'cyrius',
-    'sirus',
-    'sirous',
-    'serius',
-    'sirious'
-  ]
-  
-  // Remove the wake word and clean up
-  for (const variation of siriusVariations) {
-    if (cleanInput.startsWith(variation)) {
-      cleanInput = cleanInput.substring(variation.length).trim()
-      break
-    }
-    if (cleanInput.includes(variation)) {
-      cleanInput = cleanInput.replace(variation, '').trim()
-      break
-    }
+// Extend the Window interface for SpeechRecognition
+declare global {
+  interface Window {
+    SpeechRecognition: any
+    webkitSpeechRecognition: any
+    speechSynthesis: SpeechSynthesis
   }
-  
-  // Remove leading punctuation and extra spaces
-  cleanInput = cleanInput.replace(/^[,.\s]+/, '').trim()
-  
-  return cleanInput || input // Return original if cleaning resulted in empty string
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const { message: userInput } = await req.json()
+const WAKE_WORD = "sirius"
 
-    if (!userInput?.trim()) {
-      return NextResponse.json({ error: "User input is required." }, { status: 400 })
+type SystemStatusType =
+  | "IDLE"
+  | "LISTENING"
+  | "PROCESSING"
+  | "SPEAKING"
+  | "ESP32_COMMAND_SENT"
+  | "ERROR"
+  | "NO_WAKE_WORD"
+
+export default function VoiceChatPage() {
+  const [isListening, setIsListening] = useState(false)
+  const [isLoading, setIsLoading] = useState(false) // For API calls
+  const [currentTranscript, setCurrentTranscript] = useState("")
+  const [systemStatus, setSystemStatus] = useState<SystemStatusType>("IDLE")
+  const [statusMessage, setStatusMessage] = useState("Click the mic and say 'Sirius' followed by your command.")
+  const [lastSpokenResponse, setLastSpokenResponse] = useState("")
+
+  const recognitionRef = useRef<any>(null)
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
+
+  const { esp32Ip, sendEsp32Command, isConnected, testConnection } = useEsp32()
+  const { toast } = useToast()
+
+  // TTS Helper
+  const speak = (text: string) => {
+    if (!window.speechSynthesis) {
+      toast({ title: "TTS Error", description: "Text-to-speech not supported.", variant: "destructive" })
+      return
     }
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel()
 
-    // Check if the input contains Sirius wake word
-    const hasSiriusWakeWord = containsSiriusWakeWord(userInput)
-    
-    // If no Sirius wake word is detected, respond with a gentle prompt
-    if (!hasSiriusWakeWord) {
-      return NextResponse.json({
-        type: "conversation",
-        message: "I'm listening! Try starting your command with 'Sirius' or 'Hey Sirius' to activate smart home controls."
+    const utterance = new SpeechSynthesisUtterance(text)
+    utteranceRef.current = utterance
+    setSystemStatus("SPEAKING")
+    setStatusMessage(`Sirius says: "${text}"`)
+    setLastSpokenResponse(text)
+
+    utterance.onend = () => {
+      setSystemStatus("IDLE")
+      setStatusMessage("Click the mic and say 'Sirius' followed by your command.")
+      if (isListening) {
+        // If mic was on, turn it back on after speaking
+        if (recognitionRef.current && recognitionRef.current.stop) recognitionRef.current.start()
+      }
+    }
+    utterance.onerror = (event) => {
+      console.error("SpeechSynthesis Error:", event)
+      toast({ title: "TTS Error", description: `Could not speak: ${event.error}`, variant: "destructive" })
+      setSystemStatus("IDLE")
+    }
+    window.speechSynthesis.speak(utterance)
+  }
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      setStatusMessage("Speech recognition not supported in your browser.")
+      setSystemStatus("ERROR")
+      toast({
+        title: "Browser Not Supported",
+        description: "Speech recognition is not supported.",
+        variant: "destructive",
       })
+      return
     }
 
-    // Remove the wake word to get the actual command
-    const actualCommand = removeSiriusWakeWord(userInput)
+    recognitionRef.current = new SpeechRecognition()
+    const recognition = recognitionRef.current
+    recognition.continuous = false // Process after each pause
+    recognition.interimResults = true
+    recognition.lang = "en-US"
 
-    // Initialize the Google Generative AI with the API key
-    const genAI = new GoogleGenerativeAI(process.env.GeminiApiKey || "no api key")
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
-
-    const prompt = `
-      You are Sirius, an AI assistant for a smart home system controlled by an ESP32.
-      The user has activated you with a wake word, and now you need to process their command.
-      Your goal is to understand the user's command and translate it into a specific action for the ESP32, or respond conversationally if it's not a command.
-
-      Available devices and actions (target names are case-sensitive as used in the ESP32 API):
-      - Garage: "open", "close" (target: "garage")
-      - Window: "open", "close" (target: "window")
-      - Door: "open", "close" (target: "door")
-      - Garage LED: "on", "off" (target: "garage_led")
-      - Room 1 LED: "on", "off" (target: "room1_led")
-      - Room 2 LED: "on", "off" (target: "room2_led")
-      - Buzzer: "on", "off", "beep" (target: "buzzer")
-
-      Response Format:
-      - If the user's query is a command for one of the above actions, respond with ONLY a JSON object:
-        {"type": "action", "command": {"action": "ACTION_NAME", "target": "TARGET_NAME"}}
-        Example: User says "Turn on the garage light". You respond: {"type": "action", "command": {"action": "on", "target": "garage_led"}}
-
-      - If the user's query is a general question, greeting, or something not related to a direct command, respond conversationally as Sirius.
-        In this case, respond with ONLY a JSON object:
-        {"type": "conversation", "message": "Your conversational response here."}
-        Example: User says "Hello". You respond: {"type": "conversation", "message": "Hello! I'm Sirius, your smart home assistant. How can I help you today?"}
-
-      - If the user's command is ambiguous or unclear, ask for clarification.
-        Respond with ONLY a JSON object:
-        {"type": "clarification", "message": "Your clarification question here."}
-        Example: User says "Turn off the light". You respond: {"type": "clarification", "message": "Which light would you like me to turn off? The garage, room 1, or room 2 light?"}
-
-      - If the user's query is a command but for an unsupported action or device, inform them.
-        Respond with ONLY a JSON object:
-        {"type": "error", "message": "Sorry, I can't perform that action. I can control the garage, window, door, specific LEDs, and the buzzer."}
-
-      IMPORTANT: 
-      - Respond with ONLY the JSON object, no additional text or explanation.
-      - You are Sirius, so respond in character when having conversations.
-      - Be helpful and friendly in your responses.
-
-      User command (wake word already removed): "${actualCommand}"
-    `
-
-    const result = await model.generateContent(prompt)
-    const responseText = result.response.text().trim()
-
-    // Clean up the response text to extract just the JSON
-    let cleanResponse = responseText
-    
-    // Remove markdown code blocks if present
-    if (cleanResponse.includes('```json')) {
-      cleanResponse = cleanResponse.replace(/```json\s*/, '').replace(/```\s*$/, '')
-    } else if (cleanResponse.includes('```')) {
-      cleanResponse = cleanResponse.replace(/```\s*/, '').replace(/```\s*$/, '')
+    recognition.onstart = () => {
+      setIsListening(true)
+      setSystemStatus("LISTENING")
+      setStatusMessage("Listening... Say 'Sirius' then your command.")
     }
-    
-    // Remove any extra text before or after the JSON
-    const jsonMatch = cleanResponse.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      cleanResponse = jsonMatch[0]
+
+    recognition.onresult = (event: any) => {
+      let interim = ""
+      let final = ""
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        const transcriptPart = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          final += transcriptPart
+        } else {
+          interim += transcriptPart
+        }
+      }
+      setCurrentTranscript(interim || final) // Show live transcript
+
+      if (final) {
+        processCommand(final.trim())
+      }
     }
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error)
+      if (event.error !== "no-speech" && event.error !== "aborted") {
+        toast({ title: "Speech Error", description: `Error: ${event.error}`, variant: "destructive" })
+      }
+      setIsListening(false)
+      setSystemStatus("IDLE")
+      setStatusMessage("Error listening. Click mic to try again.")
+    }
+
+    recognition.onend = () => {
+      setIsListening(false)
+      // If it ends and we weren't processing, reset status.
+      // If it was processing, it will be handled by processCommand.
+      if (systemStatus === "LISTENING") {
+        setSystemStatus("IDLE")
+        setStatusMessage("Click the mic and say 'Sirius' followed by your command.")
+      }
+    }
+
+    return () => {
+      if (recognitionRef.current && recognitionRef.current.stop) {
+        recognitionRef.current.abort() // Use abort to prevent onend from re-triggering logic
+      }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel()
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Ran once on mount
+
+  // Effect for ESP32 connection status
+  useEffect(() => {
+    if (!esp32Ip) {
+      const msg = "ESP32 IP not set. Configure in header."
+      setStatusMessage(msg)
+      // speak(msg) // Optional: speak system messages
+    } else if (!isConnected) {
+      const msg = `ESP32 at ${esp32Ip} not connected. Trying to connect...`
+      setStatusMessage(msg)
+      // speak(msg)
+      testConnection().then((connected) => {
+        if (connected) speak("Connected to ESP32.")
+        else speak("Failed to connect to ESP32. Please check the IP and network.")
+      })
+    } else {
+      const msg = `Connected to ESP32 at ${esp32Ip}. Ready for commands.`
+      setStatusMessage(msg)
+      // speak(msg)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [esp32Ip, isConnected])
+
+  const processCommand = async (text: string) => {
+    setCurrentTranscript(text) // Show the final recognized text
+    if (!text.toLowerCase().startsWith(WAKE_WORD)) {
+      setSystemStatus("NO_WAKE_WORD")
+      setStatusMessage(`Please start with "${WAKE_WORD}". You said: "${text}"`)
+      // speak(`I'm sorry, I only respond to commands starting with ${WAKE_WORD}.`)
+      setIsListening(false) // Stop listening if wake word not detected
+      return
+    }
+
+    const command = text.substring(WAKE_WORD.length).trim()
+    if (!command) {
+      setSystemStatus("IDLE")
+      setStatusMessage("No command after 'Sirius'. Try again.")
+      // speak("I heard Sirius, but what is your command?")
+      setIsListening(false)
+      return
+    }
+
+    setSystemStatus("PROCESSING")
+    setStatusMessage(`Processing: "${command}"`)
+    setIsLoading(true)
 
     try {
-      const jsonResponse = JSON.parse(cleanResponse)
-      
-      // Validate the response structure
-      if (!jsonResponse.type) {
-        throw new Error("Invalid response structure")
-      }
-      
-      return NextResponse.json(jsonResponse)
-    } catch (parseError) {
-      console.error("Failed to parse Gemini response as JSON:", responseText, parseError)
-      
-      // Fallback response
-      return NextResponse.json({
-        type: "conversation",
-        message: "I had trouble understanding that command. Could you try rephrasing it?",
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: command }),
       })
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        throw new Error(errorData.details || errorData.error || `API error: ${res.statusText}`)
+      }
+      const data = await res.json()
+
+      speak(data.message || "I've processed that.")
+
+      if (data.type === "action" && data.command) {
+        if (!esp32Ip || !isConnected) {
+          const espErrorMsg = `Understood: ${data.command.action} ${data.command.target}. But ESP32 is not connected.`
+          setLastSpokenResponse(espErrorMsg) // Update this for display
+          speak(espErrorMsg)
+          toast({
+            title: "ESP32 Not Connected",
+            description: `Command '${data.command.action} ${data.command.target}' not sent.`,
+            variant: "destructive",
+          })
+        } else {
+          setSystemStatus("ESP32_COMMAND_SENT")
+          setStatusMessage(`Sending to ESP32: ${data.command.action} ${data.command.target}`)
+          const commandResult = await sendEsp32Command(data.command)
+          // The main AI response is already spoken. Now speak ESP32 feedback.
+          speak(commandResult.message) // This will update statusMessage via speak()
+          if (!commandResult.success) {
+            toast({ title: "ESP32 Command Failed", description: commandResult.message, variant: "destructive" })
+          } else {
+            toast({ title: "ESP32 Command Success", description: commandResult.message })
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error("Processing command error:", error)
+      const errorMsg = error.message || "Sorry, I encountered an error."
+      speak(errorMsg)
+      setSystemStatus("ERROR")
+      setStatusMessage(`Error: ${errorMsg}`)
+      toast({ title: "Processing Error", description: errorMsg, variant: "destructive" })
+    } finally {
+      setIsLoading(false)
+      // recognition.stop() is called implicitly by continuous=false, or by onend if error
+      // We want to be ready for the next command, so set to IDLE.
+      // speak() will set it to IDLE on utterance.onend
     }
-  } catch (error) {
-    console.error("Error in smart home API:", error)
-    return NextResponse.json({ 
-      error: "Internal server error processing your request.",
-      details: String(error)
-    }, { status: 500 })
   }
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) return
+
+    if (isListening) {
+      recognitionRef.current.stop()
+      // onend will set isListening to false and update status
+    } else {
+      if (window.speechSynthesis && window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel() // Stop speaking if user clicks mic
+      }
+      setCurrentTranscript("")
+      setLastSpokenResponse("")
+      recognitionRef.current.start()
+    }
+  }
+
+  const getStatusIcon = () => {
+    switch (systemStatus) {
+      case "LISTENING":
+        return <Mic className="h-6 w-6 text-blue-400 animate-pulse" />
+      case "PROCESSING":
+        return <Loader2 className="h-6 w-6 text-yellow-400 animate-spin" />
+      case "SPEAKING":
+        return <Volume2 className="h-6 w-6 text-green-400 animate-ping" />
+      case "ESP32_COMMAND_SENT":
+        return <Zap className="h-6 w-6 text-purple-400" />
+      case "ERROR":
+      case "NO_WAKE_WORD":
+        return <AlertCircle className="h-6 w-6 text-red-400" />
+      default:
+        return <Info className="h-6 w-6 text-gray-400" />
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[calc(100vh-12rem)] p-4">
+      <Card className="w-full max-w-md shadow-2xl glass-effect">
+        <CardHeader className="text-center">
+          <CardTitle className="text-2xl font-bold flex items-center justify-center">
+            <Mic className="h-7 w-7 mr-2 text-primary" />
+            Sirius Voice Control
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col items-center space-y-6 p-6">
+          <div className="flex items-center justify-center space-x-3 p-4 rounded-lg bg-background/50 min-h-[60px] w-full text-center">
+            {getStatusIcon()}
+            <p className="text-sm text-foreground/80">{statusMessage}</p>
+          </div>
+
+          {currentTranscript && (
+            <div className="w-full p-3 border rounded-md bg-secondary/30">
+              <p className="text-xs text-muted-foreground">You said:</p>
+              <p className="text-sm italic">{currentTranscript}</p>
+            </div>
+          )}
+
+          {lastSpokenResponse && systemStatus !== "SPEAKING" && (
+            <div className="w-full p-3 border rounded-md bg-primary/10">
+              <p className="text-xs text-muted-foreground">Sirius replied:</p>
+              <p className="text-sm">{lastSpokenResponse}</p>
+            </div>
+          )}
+
+          <Button
+            onClick={toggleListening}
+            disabled={isLoading && systemStatus === "PROCESSING"} // Disable only when strictly processing API call
+            variant={isListening ? "outline" : "default"}
+            size="lg"
+            className={cn(
+              "rounded-full w-24 h-24 text-2xl transition-all duration-300 ease-in-out transform hover:scale-105",
+              isListening ? "bg-red-500/20 border-red-500 hover:bg-red-500/30" : "bg-primary hover:bg-primary/90",
+              isLoading && systemStatus === "PROCESSING" && "opacity-50 cursor-not-allowed",
+            )}
+          >
+            {isListening ? <MicOff className="h-10 w-10" /> : <Mic className="h-10 w-10" />}
+          </Button>
+          <p className="text-xs text-muted-foreground">{isListening ? "Tap to stop" : "Tap to start listening"}</p>
+        </CardContent>
+      </Card>
+      {!esp32Ip && (
+        <p className="mt-6 text-sm text-yellow-400 flex items-center">
+          <AlertCircle className="h-4 w-4 mr-2" /> ESP32 IP not set. Configure in header for device control.
+        </p>
+      )}
+    </div>
+  )
 }
