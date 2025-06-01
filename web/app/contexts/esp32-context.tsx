@@ -8,33 +8,66 @@ interface Esp32ContextType {
   setEsp32Ip: (ip: string | null) => void
   isConnected: boolean
   testConnection: () => Promise<boolean>
-  sendEsp32Command: (command: { action: string; target: string }) => Promise<{ success: boolean; message: string }>
+  sendCommand: (
+    endpoint: string,
+    method?: string,
+    data?: any,
+  ) => Promise<{ success: boolean; message: string; data?: any }>
+  deviceStates: any
+  refreshDeviceStates: () => Promise<void>
 }
 
 const Esp32Context = createContext<Esp32ContextType | undefined>(undefined)
 
-const ESP32_IP_KEY = "esp32IpAddress"
-
 export function Esp32Provider({ children }: { children: ReactNode }) {
   const [esp32Ip, setEsp32IpState] = useState<string | null>(null)
   const [isConnected, setIsConnected] = useState<boolean>(false)
+  const [deviceStates, setDeviceStates] = useState<any>(null)
   const { toast } = useToast()
 
+  // Load ESP32 IP from backend on mount
   useEffect(() => {
-    const storedIp = localStorage.getItem(ESP32_IP_KEY)
-    if (storedIp) {
-      setEsp32IpState(storedIp)
+    const loadEsp32Ip = async () => {
+      try {
+        const response = await fetch("/api/esp32")
+        const data = await response.json()
+        if (data.success && data.ip) {
+          setEsp32IpState(data.ip)
+        }
+      } catch (error) {
+        console.error("Failed to load ESP32 IP:", error)
+      }
     }
+    loadEsp32Ip()
   }, [])
 
-  const setEsp32Ip = (ip: string | null) => {
-    if (ip) {
-      localStorage.setItem(ESP32_IP_KEY, ip)
-    } else {
-      localStorage.removeItem(ESP32_IP_KEY)
+  const setEsp32Ip = async (ip: string | null) => {
+    try {
+      if (ip) {
+        const cleanIp = ip.trim().replace(/\s+/g, "")
+        const response = await fetch("/api/esp32", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "setIp", ip: cleanIp }),
+        })
+
+        const data = await response.json()
+        if (data.success) {
+          setEsp32IpState(cleanIp)
+          setIsConnected(false)
+          setDeviceStates(null)
+        } else {
+          toast({ title: "Error", description: data.message, variant: "destructive" })
+        }
+      } else {
+        setEsp32IpState(null)
+        setIsConnected(false)
+        setDeviceStates(null)
+      }
+    } catch (error) {
+      console.error("Failed to set ESP32 IP:", error)
+      toast({ title: "Error", description: "Failed to set ESP32 IP address", variant: "destructive" })
     }
-    setEsp32IpState(ip)
-    setIsConnected(false) // Reset connection status when IP changes
   }
 
   const testConnection = useCallback(async () => {
@@ -43,28 +76,76 @@ export function Esp32Provider({ children }: { children: ReactNode }) {
       setIsConnected(false)
       return false
     }
+
     try {
-      const response = await fetch(`http://${esp32Ip}/api/status`)
-      if (response.ok) {
-        toast({ title: "Success", description: "Connected to ESP32 successfully!" })
+      const response = await fetch("/api/esp32", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "testConnection" }),
+      })
+
+      const data = await response.json()
+      if (data.success) {
+        toast({ title: "Success", description: data.message })
         setIsConnected(true)
+        if (data.data) {
+          setDeviceStates(data.data)
+        }
         return true
       } else {
-        toast({
-          title: "Error",
-          description: `Failed to connect to ESP32 (status: ${response.status}).`,
-          variant: "destructive",
-        })
+        toast({ title: "Error", description: data.message, variant: "destructive" })
         setIsConnected(false)
         return false
       }
     } catch (error) {
-      console.error("ESP32 connection test error:", error)
-      toast({ title: "Error", description: "Could not reach ESP32. Check IP and network.", variant: "destructive" })
+      console.error("Connection test error:", error)
+      toast({ title: "Error", description: "Failed to test connection", variant: "destructive" })
       setIsConnected(false)
       return false
     }
   }, [esp32Ip, toast])
+
+  const sendCommand = async (
+    endpoint: string,
+    method = "GET",
+    data?: any,
+  ): Promise<{ success: boolean; message: string; data?: any }> => {
+    if (!esp32Ip) {
+      return { success: false, message: "ESP32 IP Address not set." }
+    }
+
+    try {
+      const response = await fetch("/api/esp32", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "sendCommand",
+          endpoint,
+          method,
+          data,
+        }),
+      })
+
+      const result = await response.json()
+      return result
+    } catch (error) {
+      console.error("Send command error:", error)
+      return { success: false, message: "Failed to send command to ESP32" }
+    }
+  }
+
+  const refreshDeviceStates = useCallback(async () => {
+    if (!esp32Ip || !isConnected) return
+
+    try {
+      const result = await sendCommand("/api/status")
+      if (result.success && result.data) {
+        setDeviceStates(result.data)
+      }
+    } catch (error) {
+      console.error("Failed to refresh device states:", error)
+    }
+  }, [esp32Ip, isConnected])
 
   useEffect(() => {
     if (esp32Ip) {
@@ -72,39 +153,18 @@ export function Esp32Provider({ children }: { children: ReactNode }) {
     }
   }, [esp32Ip, testConnection])
 
-  const sendEsp32Command = async (command: { action: string; target: string }): Promise<{
-    success: boolean
-    message: string
-  }> => {
-    if (!esp32Ip) {
-      return { success: false, message: "ESP32 IP Address not set." }
-    }
-    if (!isConnected && !(await testConnection())) {
-      return { success: false, message: "ESP32 not connected. Please check IP and connection." }
-    }
-
-    try {
-      const response = await fetch(`http://${esp32Ip}/api/control`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(command),
-      })
-      const data = await response.json()
-      if (response.ok && data.status === "success") {
-        return { success: true, message: data.message || "Command executed successfully." }
-      } else {
-        return { success: false, message: data.message || `Failed to execute command (status: ${response.status}).` }
-      }
-    } catch (error) {
-      console.error("Send ESP32 command error:", error)
-      return { success: false, message: "Error sending command to ESP32. Check network." }
-    }
-  }
-
   return (
-    <Esp32Context.Provider value={{ esp32Ip, setEsp32Ip, isConnected, testConnection, sendEsp32Command }}>
+    <Esp32Context.Provider
+      value={{
+        esp32Ip,
+        setEsp32Ip,
+        isConnected,
+        testConnection,
+        sendCommand,
+        deviceStates,
+        refreshDeviceStates,
+      }}
+    >
       {children}
     </Esp32Context.Provider>
   )

@@ -9,14 +9,14 @@ import { SendHorizonal, Loader2, AlertCircle } from "lucide-react"
 import { useEsp32 } from "@/app/contexts/esp32-context"
 import { v4 as uuidv4 } from "uuid"
 import { useToast } from "@/components/ui/use-toast"
-import { MessageCircle } from "lucide-react" // Declared MessageCircle here
+import { MessageCircle } from "lucide-react"
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
-  const { esp32Ip, sendEsp32Command, isConnected } = useEsp32()
+  const { esp32Ip, sendCommand, isConnected } = useEsp32()
   const { toast } = useToast()
 
   useEffect(() => {
@@ -119,20 +119,60 @@ export default function ChatPage() {
             variant: "destructive",
           })
         } else {
-          const commandResult = await sendEsp32Command(data.command)
-          const feedbackMessage: Message = {
-            id: uuidv4(),
-            sender: "bot", // Or 'system'
-            content: commandResult.message,
-            type: "action_feedback",
-            success: commandResult.success,
-            timestamp: new Date(),
+          // Use direct endpoint instead of /api/control
+          let endpoint = ""
+          const { action, target } = data.command
+
+          // Map the command to the appropriate direct endpoint
+          if (target === "garage") {
+            endpoint = `/api/garage/${action}`
+          } else if (target === "window") {
+            endpoint = `/api/window/${action}`
+          } else if (target === "door") {
+            endpoint = `/api/door/${action}`
+          } else if (target === "garage_led") {
+            endpoint = `/api/led/garage/${action}`
+          } else if (target === "room1_led") {
+            endpoint = `/api/led/room1/${action}`
+          } else if (target === "room2_led") {
+            endpoint = `/api/led/room2/${action}`
+          } else if (target === "buzzer") {
+            endpoint = `/api/buzzer/${action}`
           }
-          setMessages((prev) => [...prev, feedbackMessage])
-          if (!commandResult.success) {
-            toast({ title: "ESP32 Command Failed", description: commandResult.message, variant: "destructive" })
+
+          if (endpoint) {
+            const commandResult = await sendCommand(endpoint)
+            const feedbackMessage: Message = {
+              id: uuidv4(),
+              sender: "bot",
+              content: commandResult.message,
+              type: "action_feedback",
+              success: commandResult.success,
+              timestamp: new Date(),
+            }
+            setMessages((prev) => [...prev, feedbackMessage])
+            if (!commandResult.success) {
+              toast({ title: "ESP32 Command Failed", description: commandResult.message, variant: "destructive" })
+            } else {
+              toast({ title: "ESP32 Command Success", description: commandResult.message })
+            }
           } else {
-            toast({ title: "ESP32 Command Success", description: commandResult.message })
+            // Fallback to /api/control if no direct endpoint is found
+            const commandResult = await sendCommand("/api/control", "POST", data.command)
+            const feedbackMessage: Message = {
+              id: uuidv4(),
+              sender: "bot",
+              content: commandResult.message,
+              type: "action_feedback",
+              success: commandResult.success,
+              timestamp: new Date(),
+            }
+            setMessages((prev) => [...prev, feedbackMessage])
+            if (!commandResult.success) {
+              toast({ title: "ESP32 Command Failed", description: commandResult.message, variant: "destructive" })
+            } else {
+              toast({ title: "ESP32 Command Success", description: commandResult.message })
+            }
           }
         }
       }

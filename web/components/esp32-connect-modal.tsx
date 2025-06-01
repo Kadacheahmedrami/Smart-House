@@ -24,7 +24,14 @@ export function Esp32ConnectModal() {
   const { toast } = useToast()
 
   const handleSave = async () => {
-    setEsp32Ip(currentIp)
+    // Trim any whitespace from the IP address
+    const trimmedIp = currentIp.trim()
+    if (!trimmedIp) {
+      toast({ title: "Error", description: "Please enter a valid IP address", variant: "destructive" })
+      return
+    }
+
+    setEsp32Ip(trimmedIp)
     const success = await testConnection()
     if (success) {
       setIsOpen(false)
@@ -55,9 +62,7 @@ export function Esp32ConnectModal() {
           <DialogTitle className="flex items-center">
             <Zap className="mr-2 h-5 w-5 text-primary" /> Connect to ESP32
           </DialogTitle>
-          <DialogDescription>
-            Enter the IP address or domain of your ESP32 device to control your smart home.
-          </DialogDescription>
+          <DialogDescription>Enter the IP address of your ESP32 device to control your smart home.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid grid-cols-4 items-center gap-4">

@@ -2,11 +2,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { MessageCircle, Mic, Zap } from "lucide-react"
 import Link from "next/link"
+import { DeviceControlPanel } from "@/components/device-control-panel"
 
 export default function HomePage() {
   return (
-    <div className="flex flex-col items-center justify-center min-h-[calc(100vh-12rem)]">
-      <div className="text-center mb-12">
+    <div className="flex flex-col items-center justify-center space-y-8">
+      <div className="text-center mb-4">
         <Zap className="h-24 w-24 text-primary mx-auto mb-4 animate-pulse" />
         <h1 className="text-5xl font-bold tracking-tight">ESP32 AI Home Control</h1>
         <p className="mt-4 text-xl text-muted-foreground max-w-2xl mx-auto">
@@ -14,6 +15,8 @@ export default function HomePage() {
           cutting-edge AI.
         </p>
       </div>
+
+      <DeviceControlPanel />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl w-full">
         <Card className="hover:shadow-primary/20 hover:shadow-lg transition-shadow duration-300 glass-effect">
@@ -54,7 +57,7 @@ export default function HomePage() {
           </CardContent>
         </Card>
       </div>
-      <p className="mt-12 text-sm text-muted-foreground">
+      <p className="mt-4 text-sm text-muted-foreground">
         Ensure your ESP32 is connected and the IP address is configured in the header settings.
       </p>
     </div>
